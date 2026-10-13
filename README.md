@@ -321,6 +321,114 @@ Hay un detalle en los nombres elegidos. Prometheus se consulta a sí mismo como 
 
 Un detalle sobre cómo llega este archivo al contenedor: el volumen en el compose no lleva `:ro`, aunque Prometheus solo necesita leerlo. Agregarlo sería coherente con el criterio de mínimo privilegio que se aplica en los otros volúmenes, y el laboratorio funcionaría igual.
 
+
+
+---
+
+## Práctica en Killercoda
+
+Evidencia de la práctica de monitoreo realizada en Killercoda, en el orden en que se hizo. Como cada entorno dura una hora y luego se destruye, la práctica se hizo en dos sesiones: en la primera se recorrieron los pasos de Prometheus y la conexión con Grafana (secciones 1 a 6), y en la segunda se volvió a conectar la fuente de datos, se armó el dashboard y se ejecutó la prueba de carga (secciones 7 a 9). Por eso el identificador del contenedor de MySQL que aparece en la consulta de CPU de la sección 5 corresponde a la primera sesión y cambia en cada entorno nuevo.
+
+### Conceptos previos: métricas y logs
+
+Un **log** es un registro de eventos: una línea por cada petición o consulta, con todo el detalle de lo ocurrido. Sirve para investigar un momento puntual, pero hay que ir a buscarlo, filtrarlo y leerlo, como se hacía con `grep` y `awk` en la práctica anterior.
+
+Una **métrica** es un número que cambia en el tiempo: peticiones por segundo, conexiones abiertas, CPU utilizada. No cuenta la historia de cada petición, pero permite ver tendencias y picos de un vistazo y disparar alertas automáticas. Los dos enfoques se complementan: las métricas sirven para detectar que algo pasa, y los logs para investigar el detalle después.
+
+En este stack hay tres fuentes de métricas: la aplicación Flask (que las expone directamente en `/metrics`), MySQL (a través de `dbexporter`) y los contenedores (a través de cAdvisor). Prometheus las junta a todas con el mecanismo de *scrape* descrito en la Parte 4.
+
+### 1. Entorno listo
+
+El entorno levanta los servicios descritos en el informe: MySQL en la red interna, `dbexporter`, cAdvisor, Prometheus en el puerto 9090, Grafana en el 3000 y la aplicación CRUD Flask en el 8888 con sus métricas en `/metrics`.
+
+![Entorno listo](img/01-entorno-listo.png)
+
+### 2. Métricas de la aplicación
+
+Con `curl -s http://127.0.0.1:8888/metrics | head -20` se ve el formato de texto que expone la aplicación. Cada métrica va precedida por una línea `# HELP` (descripción) y una `# TYPE` (tipo: `counter`, `gauge`, etc.). Prometheus lee exactamente este formato.
+
+![Métricas de la app Flask](img/02-metricas-app-flask.png)
+
+### 3. Targets en Prometheus
+
+En *Status → Target health* se ven los cuatro jobs definidos en `prometheus.yml` (`cadvisor`, `crud-app`, `mysql` y `prometheus`), todos en estado **UP**. Se observa que cada uno se consulta con la dirección que corresponde: nombres de servicio para los que están en la red, y `host.docker.internal:8888` para la aplicación del host.
+
+![Targets en Prometheus](img/03-prometheus-targets.png)
+
+### 4. La consulta `up`
+
+La consulta PromQL `up` devuelve una serie por target: `1` si la última consulta tuvo éxito y `0` si falló. Aquí devuelve cuatro series con valor 1, coherente con la pantalla anterior.
+
+![Consulta up](img/04-consulta-up.png)
+
+### 5. Métricas de MySQL y de contenedores
+
+Primero se consultó `mysql_global_status_threads_connected`, que muestra cuántas conexiones tiene abiertas MySQL en cada momento (es un *gauge*, un valor que sube y baja). El gráfico muestra un valor constante de 2.
+
+![Threads conectados](img/05-mysql-threads-connected.png)
+
+Después se ejecutó una consulta sobre las métricas de cAdvisor para ver la CPU del contenedor de MySQL:
+
+```promql
+rate(container_cpu_usage_seconds_total{id=~".*cb51958903ff.*"}[1m])
+```
+
+`container_cpu_usage_seconds_total` es un contador acumulado (siempre crece). La función `rate(...[1m])` lo convierte en una velocidad: cuántos segundos de CPU por segundo se consumieron, promediado en la última ventana de un minuto. El filtro `id=~".*cb51958903ff.*"` usa una expresión regular para quedarse solo con el contenedor cuyo identificador contiene ese fragmento, que corresponde a MySQL en este entorno. En el gráfico se observa un pico al comienzo y luego un consumo bajo y estable, cercano a 0,01.
+
+![CPU del contenedor MySQL](img/06-cpu-contenedor-mysql.png)
+
+### 6. Conexión de Prometheus con Grafana
+
+En Grafana se agregó Prometheus como fuente de datos (*Connections → Data sources → Add data source*). Como URL del servidor se usó el nombre del servicio, `http://prometheus:9090`, y no `localhost`: Grafana y Prometheus corren en contenedores distintos y se alcanzan por el DNS interno de la red `mynetwork` (ver Parte 3). Al presionar *Save & test*, Grafana confirmó "Successfully queried the Prometheus API".
+
+![Datasource de Prometheus en Grafana](img/07-grafana-datasource.png)
+
+### 7. Primer panel: Requests por segundo
+
+En un dashboard nuevo (llamado `DATA`) se creó un panel con la fuente `prometheus`, el título "Requests por segundo" y la consulta:
+
+```promql
+rate(flask_http_request_duration_seconds_count[1m])
+```
+
+La métrica `flask_http_request_duration_seconds_count` cuenta cuántos pedidos HTTP recibió la aplicación; con `rate` se obtiene el promedio de pedidos por segundo en la última ventana de un minuto. La leyenda muestra las etiquetas con las que Prometheus identifica la serie: `job="crud-app"`, `instance="host.docker.internal:8888"`, `method="GET"`, `path="/"` y `status="200"`. Antes de generar carga el valor es 0, porque la aplicación casi no recibe tráfico.
+
+![Panel de requests por segundo](img/08-grafana-panel-requests.png)
+
+### 8. Segundo panel: Conexiones MySQL
+
+Se agregó un segundo panel con la consulta `mysql_global_status_threads_connected`, que muestra cuántas conexiones tiene abiertas MySQL. En reposo el valor es 2. La serie viene del job `mysql` y su instancia es `dbexporter:9104`, lo que confirma que los datos pasan por el exporter y no directamente por MySQL.
+
+El dashboard se configuró con un rango de *Last 5 minutes* y un refresco automático de 5 segundos, igual al intervalo de consulta de Prometheus.
+
+![Panel de conexiones de MySQL](img/09-grafana-panel-mysql.png)
+
+### 9. Prueba de carga en vivo
+
+Con los dos paneles a la vista se generó tráfico contra la aplicación desde la terminal:
+
+```bash
+seq 1 2000 | xargs -P 50 -I{} curl -s -o /dev/null http://127.0.0.1:8888/
+```
+
+El comando se lee de izquierda a derecha: `seq 1 2000` genera los números del 1 al 2000, uno por línea; `xargs -P 50 -I{}` ejecuta un comando por cada línea, con hasta 50 en paralelo; y cada comando es un `curl` silencioso (`-s`) que descarta la respuesta (`-o /dev/null`) y pide la página principal. En total son 2000 peticiones con 50 simultáneas.
+
+En las capturas se observa el efecto sobre ambos paneles mientras la carga corría. Al comienzo, el panel de requests sale de 0 y las conexiones a MySQL saltan de 2 a casi 50:
+
+![Inicio de la carga](img/10-stress-test-inicio.png)
+
+Con la carga en curso, las peticiones por segundo siguen subiendo hasta alrededor de 13,5, y las conexiones a MySQL oscilan entre aproximadamente 20 y 50:
+
+![Carga en curso](img/11-stress-test-carga.png)
+
+Al terminar el comando el tráfico se detiene y ambos paneles vuelven al reposo. Esta última captura muestra la curva completa de la prueba: valores planos antes de empezar, una subida, una meseta de unas 13 peticiones por segundo durante poco más de dos minutos, y una bajada hasta 0. Las conexiones a MySQL regresan a 2, el mismo valor que tenían antes de la carga:
+
+![Curva completa de la prueba de carga](img/12-stress-test-curva-completa.png)
+
+Hay tres cosas para interpretar. La subida de requests es gradual y no instantánea porque `rate(...[1m])` promedia el último minuto, así que en los primeros segundos el valor graficado queda por debajo del tráfico real, y por la misma razón la bajada también es en rampa. Las conexiones, en cambio, cayeron a 2 en un par de muestras, porque `mysql_global_status_threads_connected` es un *gauge*: muestra el valor del instante y no un promedio. Y las conexiones cercanas a 50 son coherentes con las 50 peticiones simultáneas: cada petición a `/` dispara una consulta a la base, de modo que el número de conexiones acompaña al tráfico.
+
+**Comparación con la práctica de logs.** Con logs había que esperar a que terminara la carga, buscar el archivo, filtrarlo y contarlo con `grep` y `awk` para recién entonces notar el pico. Con Prometheus y Grafana el pico se vio mientras ocurría, sin abrir ningún archivo. En un entorno real se usan los dos enfoques: métricas para detectar y alertar en el momento, y logs para investigar el detalle después.
+
 **Sintaxis YAML:**
 
 - **Lista de mapeos:** cada `- job_name: ...` abre un elemento de la lista `scrape_configs`, y el elemento es un conjunto de claves (`job_name`, `static_configs`).
