@@ -135,4 +135,78 @@ El `my.cnf` contiene los datos de conexión a MySQL, es decir, información sens
 6. **Práctica en Killercoda:** evidencia de lo realizado, con capturas.
 7. **Conclusión.**
 
+
+
+---
+
+## Parte 2 — Recolección de métricas: `cadvisor` y `prometheus`
+
+### El servicio `cadvisor`
+
+cAdvisor observa a los demás contenedores y mide cuánta CPU, memoria, red y disco consume cada uno. Publica esas métricas por HTTP en el puerto 8080 del contenedor.
+
+```yaml
+cadvisor:
+  image: gcr.io/cadvisor/cadvisor:v0.47.2
+  restart: always
+  volumes:
+    - /:/rootfs:ro
+    - /var/run:/var/run:ro
+    - /sys:/sys:ro
+    - /var/lib/docker/:/var/lib/docker:ro
+    - /dev/disk/:/dev/disk:ro
+  networks:
+    - mynetwork
+```
+
+La imagen usa una versión fija (`v0.47.2`) en lugar de `latest`, y el prefijo `gcr.io/` indica que no se descarga de Docker Hub sino del registro de contenedores de Google.
+
+**¿Por qué monta rutas del host y por qué en solo lectura?**
+Un contenedor está aislado: por defecto solo ve su propio sistema de archivos. Pero cAdvisor justamente necesita ver lo que ocurre con *otros* contenedores, y esa información la tiene el sistema anfitrión:
+
+| Ruta del host | Para qué la necesita cAdvisor |
+| --- | --- |
+| `/` (montada como `/rootfs`) | Ver el sistema de archivos del host y calcular uso de disco. |
+| `/var/run` | Contiene el socket de Docker, por el que se consulta qué contenedores existen. |
+| `/sys` | Ahí el kernel expone los *cgroups*, que son los contadores de CPU y memoria de cada contenedor. |
+| `/var/lib/docker` | Datos y estado de los contenedores. |
+| `/dev/disk` | Información de los discos. |
+
+Todas llevan `:ro` porque cAdvisor solo **observa**. Como se le da mucha visibilidad sobre el host, se le quita la posibilidad de escribir: si algo saliera mal, no podría modificar el sistema.
+
+### El servicio `prometheus`
+
+Prometheus es el recolector. Cada pocos segundos visita cada target (el endpoint de un servicio que expone métricas) y guarda lo que encuentra como series de tiempo, que luego se pueden consultar con PromQL. Qué targets visita lo define el archivo `prometheus.yml` (Parte 4).
+
+```yaml
+prometheus:
+  image: prom/prometheus:latest
+  restart: always
+  ports:
+    - "9090:9090"
+  volumes:
+    - ./prometheus.yml:/etc/prometheus/prometheus.yml
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  networks:
+    - mynetwork
+```
+
+**¿Qué puerto se publica y por qué?**
+`ports` usa el formato `"PUERTO_HOST:PUERTO_CONTENEDOR"`. Con `"9090:9090"`, lo que llegue al puerto 9090 de la máquina anfitriona se redirige al 9090 del contenedor de Prometheus. Se publica porque hay que entrar a su interfaz web desde el navegador para ver los targets y ejecutar consultas. En cambio, cAdvisor no necesita publicar nada: su único cliente es Prometheus, que lo alcanza por la red interna como `cadvisor:8080`. Publicar solo lo imprescindible reduce lo que queda expuesto.
+
+**¿Qué resuelve `extra_hosts` con `host.docker.internal`?**
+La aplicación Flask del CRUD corre en el host, fuera de `mynetwork`. Por eso Prometheus no puede encontrarla por nombre de servicio como hace con `cadvisor` o `dbexporter`. `extra_hosts` agrega una entrada al archivo `/etc/hosts` del contenedor: el nombre `host.docker.internal` pasa a apuntar a la dirección del host, y `host-gateway` es el valor especial con el que Docker completa esa dirección automáticamente. Gracias a esto funciona el target `host.docker.internal:8888`. En Linux ese nombre no existe por defecto (en Docker Desktop sí), de ahí que haya que declararlo.
+
+**¿Cómo recibe Prometheus su configuración?**
+El volumen `./prometheus.yml:/etc/prometheus/prometheus.yml` toma el archivo que está junto al compose y lo coloca en la ruta donde Prometheus busca su configuración. Así se puede cambiar qué se monitorea editando un archivo del host, sin modificar la imagen. A diferencia de los volúmenes anteriores, este no lleva `:ro`.
+
+### Sintaxis YAML de esta parte
+
+- **Cadenas entre comillas:** `"9090:9090"` y `"host.docker.internal:host-gateway"` van entre comillas para que YAML las tome siempre como texto. Con los puertos es una práctica recomendada por Docker, porque un valor con formato `NN:NN` donde el segundo número es menor que 60 (por ejemplo `22:22`) puede interpretarse como un número en base 60 y no como un mapeo de puertos.
+- **Listas de cadenas** con patrón `origen:destino` en `volumes`, `ports` y `extra_hosts`.
+- **Rutas absolutas y relativas:** las de cAdvisor (`/sys`, `/var/run`) son absolutas del host; `./prometheus.yml` es relativa a la carpeta del compose.
+- **Etiqueta de imagen:** `v0.47.2` fija una versión concreta, mientras que `latest` puede cambiar.
+- **Ruta completa de imagen:** `gcr.io/cadvisor/cadvisor:v0.47.2` sigue el patrón `registro/organización/imagen:etiqueta`.
+
 En cada parte se explica qué hace el servicio y cómo se lee la sintaxis YAML que aparece.
