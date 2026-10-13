@@ -281,3 +281,50 @@ Desde el navegador del host se usa `localhost:3000`, pero desde Grafana hacia Pr
 
 
 En cada parte se explica qué hace el servicio y cómo se lee la sintaxis YAML que aparece.
+
+
+
+---
+
+## Parte 4 — El archivo `prometheus.yml`
+
+Este archivo no forma parte del `docker-compose.yml`: es la configuración de Prometheus, y se le entrega al contenedor mediante un volumen (ver Parte 2). Define cada cuánto consultar y a quién.
+
+```yaml
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['cadvisor:8080']
+
+  - job_name: 'mysql'
+    static_configs:
+      - targets: ['dbexporter:9104']
+
+  - job_name: 'crud-app'
+    static_configs:
+      - targets: ['host.docker.internal:8888']
+```
+
+- **`global.scrape_interval: 5s`**: Prometheus consulta cada target cada 5 segundos. En la pantalla de Targets se ve que el "last scrape" nunca supera unos pocos segundos.
+- **`scrape_configs`**: lista de *jobs*. Cada job agrupa uno o más targets del mismo tipo.
+- **`job_name`**: nombre del grupo. Prometheus lo agrega como etiqueta `job` a cada métrica, por eso en la consulta `up` aparecen `job="mysql"`, `job="cadvisor"`, etc.
+- **`static_configs` / `targets`**: lista fija de direcciones `host:puerto` a consultar. Por defecto Prometheus pide la ruta `/metrics`. La dirección completa también queda como etiqueta `instance`.
+
+Hay un detalle en los nombres elegidos. Prometheus se consulta a sí mismo como `localhost:9090` porque, dentro de su propio contenedor, `localhost` es él mismo. Los servicios que están en la red (`cadvisor` y `dbexporter`) se nombran por su nombre de servicio, gracias a `mynetwork`. La aplicación Flask, que está fuera de la red, se nombra con `host.docker.internal` (ver `extra_hosts` en la Parte 2). Es decir, el archivo usa tres formas distintas de direccionar según dónde viva cada target.
+
+Un detalle sobre cómo llega este archivo al contenedor: el volumen en el compose no lleva `:ro`, aunque Prometheus solo necesita leerlo. Agregarlo sería coherente con el criterio de mínimo privilegio que se aplica en los otros volúmenes, y el laboratorio funcionaría igual.
+
+**Sintaxis YAML:**
+
+- **Lista de mapeos:** cada `- job_name: ...` abre un elemento de la lista `scrape_configs`, y el elemento es un conjunto de claves (`job_name`, `static_configs`).
+- **Listas anidadas:** `static_configs` es una lista cuyo elemento contiene `targets`, que es a su vez otra lista.
+- **Dos estilos de lista:** `['cadvisor:8080']` es la forma *en línea* (entre corchetes, separada por comas), equivalente a escribir `- cadvisor:8080` en una línea aparte, que es el estilo en bloque usado en el compose.
+- **Comillas simples:** `'prometheus'` y `'localhost:9090'` marcan el valor como texto. En el nombre del job son opcionales, pero en las direcciones con `:` conviene usarlas.
+
