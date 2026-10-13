@@ -436,3 +436,18 @@ Hay tres cosas para interpretar. La subida de requests es gradual y no instantá
 - **Dos estilos de lista:** `['cadvisor:8080']` es la forma *en línea* (entre corchetes, separada por comas), equivalente a escribir `- cadvisor:8080` en una línea aparte, que es el estilo en bloque usado en el compose.
 - **Comillas simples:** `'prometheus'` y `'localhost:9090'` marcan el valor como texto. En el nombre del job son opcionales, pero en las direcciones con `:` conviene usarlas.
 
+
+
+---
+
+## Conclusión
+
+Un stack de monitoreo es una cadena de piezas pequeñas y cada una hace una sola tarea: el exporter traduce, cAdvisor mide contenedores, Prometheus recolecta y guarda, y Grafana muestra. El `docker-compose.yml` describe cómo se conectan, y se puede leer casi como un diagrama.
+
+Varias decisiones del archivo responden al mismo criterio de **dar solo lo necesario**: los volúmenes de cAdvisor y de `my.cnf` se montan en solo lectura (`:ro`) porque esos servicios solo observan o leen; solo Prometheus y Grafana publican puertos, porque son los únicos a los que se entra desde afuera; y la comunicación interna usa nombres de servicio gracias al DNS de la red `mynetwork`, sin depender de direcciones IP que cambian. El caso de la aplicación Flask, que corre en el host, muestra qué pasa cuando algo queda fuera de esa red y por qué hace falta `extra_hosts`.
+
+Al analizarlo también aparecieron límites del laboratorio que en un entorno real habría que resolver: las contraseñas están en texto plano en el compose, MySQL no guarda sus datos en un volumen, varias imágenes usan `latest`, el volumen de `prometheus.yml` no es de solo lectura aunque Prometheus solo lo lee, y `depends_on` ordena el arranque pero no espera a que un servicio esté realmente disponible (para eso existen los *healthchecks*).
+
+La práctica también dejó clara la diferencia entre métricas y logs: durante la prueba de carga, el aumento de peticiones y de conexiones a MySQL, y también su regreso al reposo, se vieron en el dashboard mientras ocurrían, sin buscar ni filtrar ningún archivo, algo que con logs solo se podía descubrir una vez terminada la carga.
+
+En cuanto a la sintaxis YAML, el mismo archivo mostró sus piezas básicas: la jerarquía por indentación, los pares clave-valor, las listas con guion, los comentarios con `#`, las cadenas con comillas cuando contienen `:`, y dos formas equivalentes de escribir algunas estructuras (`environment` como mapeo o como lista; listas en bloque o en línea). Con eso es posible leer cualquier compose del mismo tipo y entender qué hace cada línea.
