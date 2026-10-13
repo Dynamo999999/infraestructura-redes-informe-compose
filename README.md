@@ -209,4 +209,75 @@ El volumen `./prometheus.yml:/etc/prometheus/prometheus.yml` toma el archivo que
 - **Etiqueta de imagen:** `v0.47.2` fija una versión concreta, mientras que `latest` puede cambiar.
 - **Ruta completa de imagen:** `gcr.io/cadvisor/cadvisor:v0.47.2` sigue el patrón `registro/organización/imagen:etiqueta`.
 
+- 
+
+---
+
+## Parte 3 — Visualización y topología: `grafana` y la red `mynetwork`
+
+### El servicio `grafana`
+
+```yaml
+grafana:
+  # Versión fijada a propósito: la UI de Grafana cambia entre releases y la guía
+  # (Paso 3) describe pantallas concretas. Con :latest la navegación descrita se
+  # desincroniza sola. 13.2.2 es la versión contra la que está escrito el Paso 3.
+  image: grafana/grafana:13.2.2
+  restart: always
+  ports:
+    - "3000:3000"
+  environment:
+    - GF_SECURITY_ADMIN_PASSWORD=admin
+  depends_on:
+    - prometheus
+  networks:
+    - mynetwork
+```
+
+| Línea | Qué hace |
+| --- | --- |
+| `image: grafana/grafana:13.2.2` | Imagen oficial de Grafana con la versión fija. El comentario del propio archivo explica el motivo: la interfaz de Grafana cambia entre versiones y la guía de la práctica describe pantallas concretas, por lo que con `latest` esas instrucciones podrían dejar de coincidir con lo que se ve. |
+| `ports: - "3000:3000"` | Publica la interfaz web de Grafana en el puerto 3000 del host, para abrirla desde el navegador. |
+| `environment: - GF_SECURITY_ADMIN_PASSWORD=admin` | Fija la contraseña inicial del usuario `admin`. Aquí `environment` está escrito como lista (`CLAVE=valor`), forma equivalente a la de `mysql`. |
+| `depends_on: - prometheus` | Grafana se inicia después de Prometheus. |
+| `networks: - mynetwork` | Lo conecta a la red común. |
+
+**¿Por qué Grafana depende de Prometheus?**
+Grafana no recolecta ni guarda métricas: es solo la capa de visualización. Cada gráfico que muestra es el resultado de una consulta PromQL enviada a Prometheus, que es la fuente de datos. Sin Prometheus, Grafana no tiene qué dibujar.
+
+Con `depends_on` esa relación queda expresada en el archivo y Docker arranca Prometheus primero. Como en el caso de `dbexporter`, esto fija el orden de arranque pero no garantiza que Prometheus ya esté respondiendo. Grafana puede iniciar sin él; la dependencia es lógica: sin Prometheus no hay datos que mostrar.
+
+### La red `mynetwork`
+
+Al final del compose se declara la red a nivel raíz, y cada servicio se une a ella con su propia sección `networks`:
+
+```yaml
+networks:
+  mynetwork:
+```
+
+Compose crea esa red (por defecto de tipo *bridge*) y conecta a ella los cinco servicios. Dentro de una red definida por el usuario, Docker incluye un **servidor DNS interno**: cada contenedor se registra con el nombre de su servicio, y cualquier otro contenedor de la misma red puede usar ese nombre en lugar de una dirección IP.
+
+Eso es lo que hace posible que el stack funcione sin conocer ninguna IP:
+
+| Quién consulta | A quién | Dirección que se usa |
+| --- | --- | --- |
+| Grafana | Prometheus | `http://prometheus:9090` |
+| Prometheus | cAdvisor | `cadvisor:8080` |
+| Prometheus | dbexporter | `dbexporter:9104` |
+| dbexporter | MySQL | el servidor indicado en `my.cnf`; al estar ambos en la red, MySQL se alcanza por el nombre `mysql` |
+| Prometheus | Aplicación Flask (fuera de la red) | `host.docker.internal:8888` |
+
+Las IP de los contenedores cambian cada vez que se recrean, pero los nombres de servicio no. Además, la comunicación entre servicios dentro de la red usa los puertos internos del contenedor y **no requiere publicarlos** hacia el host. Por eso solo Prometheus y Grafana tienen `ports`: son los únicos a los que una persona entra desde el navegador.
+
+Desde el navegador del host se usa `localhost:3000`, pero desde Grafana hacia Prometheus se usa el nombre `prometheus`. Cada lado tiene su forma de nombrar según desde dónde se mira.
+
+### Sintaxis YAML de esta parte
+
+- **Comentarios:** las líneas que empiezan con `#` son ignoradas por YAML. El bloque de Grafana tiene un comentario de tres líneas que documenta por qué se fijó la versión.
+- **`environment` como lista:** `- GF_SECURITY_ADMIN_PASSWORD=admin` es una lista de textos con formato `CLAVE=valor`. En `mysql` se vio la forma de mapeo (`CLAVE: valor`). Compose acepta las dos.
+- **Declaración y uso de la red:** `networks:` aparece en dos lugares con distinto significado. A nivel raíz *declara* qué redes existen; dentro de un servicio *indica a cuáles se une* ese servicio.
+- **Clave con valor vacío:** `mynetwork:` sin nada a continuación es válido en YAML y significa que la red se crea con la configuración por defecto.
+
+
 En cada parte se explica qué hace el servicio y cómo se lee la sintaxis YAML que aparece.
